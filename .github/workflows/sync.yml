@@ -1,0 +1,42 @@
+
+name: Facebook - synchronizacja i publikacja
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz repozytorium
+        uses: actions/checkout@v4
+
+      - name: Przygotuj Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pobierz posty Facebook
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: python skrypty/fetch.py
+
+      - name: Skonfiguruj Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prześlij pliki strony
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./strona
+
+      - name: Opublikuj stronę
+        uses: actions/deploy-pages@v4
