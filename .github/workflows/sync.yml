@@ -36,7 +36,7 @@ jobs:
       - name: Prześlij pliki strony
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./strona
+          path: ./site
 
       - name: Opublikuj stronę
         uses: actions/deploy-pages@v4
