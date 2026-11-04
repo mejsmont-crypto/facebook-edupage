@@ -1,10 +1,9 @@
-
 name: Facebook - synchronizacja i publikacja
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 * * * *"
+    - cron: '17 * * * *'
 
 permissions:
   contents: read
@@ -22,13 +21,19 @@ jobs:
       - name: Przygotuj Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Pobierz posty Facebook
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
         run: python scripts/fetch.py
+
+      - name: Zainstaluj Pillow
+        run: python -m pip install 'Pillow>=10,<13'
+
+      - name: Wygeneruj grafikę aktualności
+        run: python scripts/generate_image.py
 
       - name: Skonfiguruj Pages
         uses: actions/configure-pages@v5
