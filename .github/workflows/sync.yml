@@ -28,7 +28,7 @@ jobs:
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
-        run: python skrypty/fetch.py
+        run: python scripts/fetch.py
 
       - name: Skonfiguruj Pages
         uses: actions/configure-pages@v5
