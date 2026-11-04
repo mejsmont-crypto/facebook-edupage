@@ -1,10 +1,10 @@
 import io
 import json
-import os
+import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
-
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,114 +13,151 @@ DATA = SITE / 'posts.json'
 OUTPUT = SITE / 'aktualnosci.png'
 WIDTH = 1080
 PAD = 34
-CARD_GAP = 20
-CARD_H = 350
-FONT_CANDIDATES = [
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-    '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf',
-]
-BOLD_CANDIDATES = [
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
-]
+CARD_H = 330
+GAP = 20
+FONT_REG = ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']
+FONT_BOLD = ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf']
 
 def font(size, bold=False):
-    for path in (BOLD_CANDIDATES if bold else FONT_CANDIDATES):
-        if os.path.exists(path):
+    for path in FONT_BOLD if bold else FONT_REG:
+        if Path(path).exists():
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
-def get_posts(payload):
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
+def posts_from(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
         for key in ('posts', 'data', 'items'):
-            val = payload.get(key)
+            val = data.get(key)
             if isinstance(val, list):
                 return val
             if isinstance(val, dict) and isinstance(val.get('data'), list):
                 return val['data']
-    raise ValueError('Nieznana struktura site/posts.json')
+    raise ValueError('Nie rozpoznano struktury posts.json')
 
-def text_lines(draw, text, f, max_width, max_lines):
-    words = str(text or '').replace('\r', '').replace('\n', ' ').split()
-    lines, line = [], ''
-    for word in words:
-        candidate = (line + ' ' + word).strip()
-        if draw.textbbox((0, 0), candidate, font=f)[2] <= max_width:
-            line = candidate
-        else:
-            if line:
-                lines.append(line)
-            line = word
-            if len(lines) >= max_lines:
-                break
-    if line and len(lines) < max_lines:
-        lines.append(line)
-    if len(lines) == max_lines and len(words) > sum(len(x.split()) for x in lines):
-        last = lines[-1]
-        while last and draw.textbbox((0, 0), last + '…', font=f)[2] > max_width:
-            last = last[:-1]
-        lines[-1] = last.rstrip() + '…'
-    return lines
+def image_urls(post):
+    urls = []
+    images = post.get('images')
+    if isinstance(images, list):
+        for item in images:
+            if isinstance(item, str):
+                urls.append(item)
+            elif isinstance(item, dict):
+                for key in ('url', 'src', 'source', 'full_picture'):
+                    if isinstance(item.get(key), str):
+                        urls.append(item[key]); break
+    elif isinstance(images, str):
+        urls.append(images)
+    for key in ('full_picture', 'picture', 'image', 'image_url'):
+        if isinstance(post.get(key), str):
+            urls.append(post[key])
+    return list(dict.fromkeys(urls))
 
 def fetch_photo(url):
-    if not url or not str(url).startswith('https://'):
+    if not isinstance(url, str) or not url.startswith('https://'):
         return None
     try:
-        req = Request(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; SchoolNews/1.0)'})
-        with urlopen(req, timeout=15) as response:
-            if 'image/' not in response.headers.get('Content-Type', ''):
+        req = Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'image/avif,image/webp,image/png,image/jpeg,image/*'})
+        with urlopen(req, timeout=12) as resp:
+            data = resp.read(10 * 1024 * 1024 + 1)
+            if len(data) > 10 * 1024 * 1024:
                 return None
-            data = response.read(8 * 1024 * 1024 + 1)
-            if len(data) > 8 * 1024 * 1024:
-                return None
-        return Image.open(io.BytesIO(data)).convert('RGB')
+        photo = Image.open(io.BytesIO(data))
+        photo.load()
+        return ImageOps.exif_transpose(photo).convert('RGB')
     except Exception as exc:
-        print(f'Nie pobrano zdjęcia: {exc}')
+        print(f'Nie udało się pobrać zdjęcia: {type(exc).__name__}: {exc}')
         return None
 
 def date_label(value):
     if not value:
-        return 'Aktualność szkolna'
+        return 'Aktualności szkolne'
     try:
         return datetime.fromisoformat(str(value).replace('Z', '+00:00')).strftime('%d.%m.%Y')
     except ValueError:
         return str(value)[:10]
 
+def clean_text(value):
+    text = str(value or '').replace('\\n', ' ').replace('\n', ' ')
+    text = ''.join(c for c in text if c == '\t' or unicodedata.category(c)[0] != 'C')
+    return re.sub(r'\s+', ' ', text).strip()
+
+def wrap_lines(draw, text, f, width, max_lines):
+    words = clean_text(text).split()
+    lines, current = [], ''
+    for word in words:
+        trial = f'{current} {word}'.strip()
+        if draw.textbbox((0, 0), trial, font=f)[2] <= width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+                current = ''
+            if len(lines) >= max_lines:
+                break
+            while word and draw.textbbox((0, 0), word, font=f)[2] > width:
+                part = word
+                while part and draw.textbbox((0, 0), part, font=f)[2] > width:
+                    part = part[:-1]
+                if not part:
+                    break
+                lines.append(part)
+                word = word[len(part):]
+                if len(lines) >= max_lines:
+                    break
+            current = word
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+    used = ' '.join(lines)
+    if len(used) < len(clean_text(text)) and lines:
+        last = lines[-1]
+        while last and draw.textbbox((0, 0), last + '…', font=f)[2] > width:
+            last = last[:-1]
+        lines[-1] = last.rstrip() + '…'
+    return lines
+
 def main():
-    if not DATA.exists():
-        raise FileNotFoundError(f'Brak pliku {DATA}. Sprawdź, czy fetch.py tworzy site/posts.json.')
-    posts = get_posts(json.loads(DATA.read_text(encoding='utf-8')))
-    posts = [p for p in posts if isinstance(p, dict)]
+    data = json.loads(DATA.read_text(encoding='utf-8'))
+    posts = [p for p in posts_from(data) if isinstance(p, dict)]
     posts.sort(key=lambda p: p.get('created_time') or p.get('date') or '', reverse=True)
     posts = posts[:3]
     if not posts:
         raise ValueError('Brak postów w posts.json')
-    height = 115 + len(posts) * (CARD_H + CARD_GAP) + 30
+    height = 115 + len(posts) * (CARD_H + GAP) + 25
     img = Image.new('RGB', (WIDTH, height), '#f4f7fc')
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, WIDTH, 105), radius=18, fill='#163e74')
-    d.text((PAD, 20), 'Najnowsze aktualności', font=font(36, True), fill='white')
-    d.text((PAD, 68), 'Szkoła Podstawowa w Dygowie  •  Facebook', font=font(19), fill='#e6eefb')
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((0, 0, WIDTH, 105), radius=18, fill='#163e74')
+    draw.text((PAD, 20), 'Najnowsze aktualności', font=font(35, True), fill='white')
+    draw.text((PAD, 70), 'Szkoła Podstawowa w Dygowie  •  Facebook', font=font(18), fill='#e6eefb')
     for i, post in enumerate(posts):
-        top = 115 + i * (CARD_H + CARD_GAP)
-        d.rounded_rectangle((PAD, top, WIDTH-PAD, top+CARD_H), radius=16, fill='white', outline='#dce4ef', width=2)
-        image_url = post.get('full_picture') or post.get('picture') or post.get('image') or post.get('image_url')
-        photo = fetch_photo(image_url)
-        x, y, photo_w, photo_h = PAD+16, top+16, 360, CARD_H-32
+        top = 115 + i * (CARD_H + GAP)
+        draw.rounded_rectangle((PAD, top, WIDTH-PAD, top+CARD_H), radius=16, fill='white', outline='#dce4ef', width=2)
+        px, py, pw, ph = PAD+14, top+14, 350, CARD_H-28
+        photo = None
+        for url in image_urls(post):
+            photo = fetch_photo(url)
+            if photo:
+                break
         if photo:
-            crop = ImageOps.fit(photo, (photo_w, photo_h), method=Image.Resampling.LANCZOS)
-            img.paste(crop, (x, y))
+            img.paste(ImageOps.fit(photo, (pw, ph), method=Image.Resampling.LANCZOS), (px, py))
         else:
-            d.rounded_rectangle((x, y, x+photo_w, y+photo_h), radius=10, fill='#e8f0fb')
-            d.text((x+42, y+130), 'AKTUALNOŚCI', font=font(25, True), fill='#163e74')
-        tx = x + photo_w + 26
-        d.text((tx, top+30), date_label(post.get('created_time') or post.get('date')), font=font(21, True), fill='#315b8d')
-        content = post.get('message') or post.get('text') or post.get('description') or post.get('title') or 'Zobacz najnowszy wpis na Facebooku.'
-        for j, line in enumerate(text_lines(d, content, font(23), WIDTH-PAD-24-tx, 8)):
-            d.text((tx, top+80+j*33), line, font=font(23), fill='#202b3a')
-        d.text((tx, top+CARD_H-44), 'Pełny wpis: kliknij grafikę', font=font(18), fill='#315b8d')
+            draw.rounded_rectangle((px, py, px+pw, py+ph), radius=12, fill='#e6eef9')
+            draw.text((px+40, py+ph//2-12), 'AKTUALNOŚCI', font=font(24, True), fill='#163e74')
+        tx = px + pw + 24
+        max_w = WIDTH-PAD-20-tx
+        draw.text((tx, top+26), date_label(post.get('created_time') or post.get('date')), font=font(21, True), fill='#315b8d')
+        message = post.get('message') or post.get('text') or post.get('description') or post.get('title') or 'Zobacz wpis na Facebooku.'
+        body_font = font(21)
+        lines = wrap_lines(draw, message, body_font, max_w, 7)
+        for j, line in enumerate(lines):
+            draw.text((tx, top+72+j*30), line, font=body_font, fill='#263447')
+        draw.text((tx, top+CARD_H-37), 'Pełny wpis: kliknij grafikę', font=font(16), fill='#315b8d')
+        print(f'Post {i+1}: {len(image_urls(post))} adresów zdjęć, zdjęcie: {bool(photo)}')
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     img.save(OUTPUT, optimize=True)
     print(f'Zapisano {OUTPUT}, liczba postów: {len(posts)}')
